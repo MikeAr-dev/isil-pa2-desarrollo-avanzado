@@ -5,6 +5,7 @@ import com.isil.edu.pe.spedidos.client.InventarioClientException;
 import com.isil.edu.pe.spedidos.client.InventarioNoDisponibleException;
 import com.isil.edu.pe.spedidos.client.dto.ProductoInventarioResponse;
 import com.isil.edu.pe.spedidos.client.dto.ReservaStockResponse;
+import com.isil.edu.pe.spedidos.client.DevolucionStockClient;
 import com.isil.edu.pe.spedidos.entity.Pedido;
 import com.isil.edu.pe.spedidos.exception.PedidoException;
 import com.isil.edu.pe.spedidos.repository.PedidoRepository;
@@ -62,6 +63,7 @@ public class PedidoServiceImpl implements PedidoService {
 
   private final PedidoRepository pedidoRepository;
   private final InventarioClient inventarioClient;
+    private final DevolucionStockClient devolucionStockClient;
 
   /**
    * Construye el servicio utilizando las dependencias proporcionadas
@@ -84,9 +86,14 @@ public class PedidoServiceImpl implements PedidoService {
    * @param inventarioClient cliente utilizado para comunicarse
    *                         con el servicio de Inventario
    */
-  public PedidoServiceImpl(PedidoRepository pedidoRepository, InventarioClient inventarioClient) {
-    this.pedidoRepository = pedidoRepository;
-    this.inventarioClient = inventarioClient;
+  public PedidoServiceImpl(
+          PedidoRepository pedidoRepository,
+          InventarioClient inventarioClient,
+          DevolucionStockClient devolucionStockClient
+  ) {
+      this.pedidoRepository = pedidoRepository;
+      this.inventarioClient = inventarioClient;
+      this.devolucionStockClient = devolucionStockClient;
   }
 
   /**
@@ -122,41 +129,54 @@ public class PedidoServiceImpl implements PedidoService {
   @Override
   @Transactional
   public Pedido registrarPedido(String cliente, String productoCodigo, int cantidad) {
-    validarDatos(cliente, productoCodigo, cantidad);
+      validarDatos(cliente, productoCodigo, cantidad);
 
-    final ReservaStockResponse reserva;
+      final ReservaStockResponse reserva;
 
-    try {
-      reserva = inventarioClient.reservarStock(productoCodigo.trim(), cantidad);
-    } catch (InventarioClientException e) {
-      /*
-       * Los errores 5xx corresponden a fallos técnicos del servicio remoto
-       * y no deben presentarse como un error de datos ingresados por el usuario.
-       */
-      if (e.getStatus() >= 500) {
-        throw new InventarioNoDisponibleException(
-            "El servicio de inventario presentó un error temporal (HTTP "
-                + e.getStatus()
-                + ").",
-            e
-        );
+      try {
+          reserva = inventarioClient.reservarStock(productoCodigo.trim(), cantidad);
+      } catch (InventarioClientException e) {
+          if (e.getStatus() >= 500) {
+              throw new InventarioNoDisponibleException(
+                      "El servicio de inventario presentó un error temporal (HTTP "
+                              + e.getStatus()
+                              + ").",
+                      e
+              );
+          }
+          throw new PedidoException(e.getMessage(), e);
       }
 
-      /*
-       * Los errores funcionales 4xx se traducen a una excepción de negocio,
-       * conservando la causa original para facilitar el diagnóstico.
-       */
-      throw new PedidoException(e.getMessage(), e);
-    }
+      validarReserva(reserva);
 
-    validarReserva(reserva);
+      BigDecimal total = reserva.getPrecio().multiply(BigDecimal.valueOf(cantidad));
 
-    BigDecimal total = reserva.getPrecio().multiply(BigDecimal.valueOf(cantidad));
+      try {
+          boolean simularFalloLocal = false; // <-- Prueba reto avanzado cambiar false a true
+          if (simularFalloLocal) {
+              throw new RuntimeException("Fallo simulado de la base de datos local antes del commit.");
+          }
 
-    Pedido pedido = new Pedido(cliente.trim(), reserva.getCodigo(), reserva.getNombre(),
-            reserva.getPrecio(), cantidad, total);
+          Pedido pedido = new Pedido(cliente.trim(), reserva.getCodigo(), reserva.getNombre(),
+                  reserva.getPrecio(), cantidad, total);
 
-    return pedidoRepository.save(pedido);
+          return pedidoRepository.save(pedido);
+
+      } catch (Exception localEx) {
+          try {
+              com.isil.edu.pe.spedidos.client.dto.DevolucionStockRequest devolucionRequest =
+                      new com.isil.edu.pe.spedidos.client.dto.DevolucionStockRequest(cantidad);
+
+              devolucionStockClient.devolverStock(reserva.getCodigo(), devolucionRequest);
+          } catch (Exception compEx) {
+              System.err.println("CRÍTICO: Falló la compensación remota. Incidente pendiente de conciliación: " + compEx.getMessage());
+          }
+
+          if (localEx instanceof PedidoException) {
+              throw (PedidoException) localEx;
+          }
+          throw new PedidoException("Error al procesar el pedido localmente. Operación compensada.", localEx);
+      }
   }
 
   /**

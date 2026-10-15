@@ -18,6 +18,8 @@ import pe.edu.isil.inventario.dto.ReservaStockRequest;
 import pe.edu.isil.inventario.dto.ReservaStockResponse;
 import pe.edu.isil.inventario.dto.StockResponse;
 import pe.edu.isil.inventario.service.InventarioService;
+import pe.edu.isil.inventario.dto.DevolucionStockRequest;
+import pe.edu.isil.inventario.dto.DevolucionStockResponse;
 
 /**
  * API REST responsable del catálogo y del stock.
